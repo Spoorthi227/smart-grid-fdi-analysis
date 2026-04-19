@@ -290,28 +290,6 @@ This dataset enables:
 * Comparison of ML models
 * Study of detection limits
 
----
-
-# Suggested Next Steps
-
-1. Train:
-
-   * Isolation Forest
-   * Autoencoder
-
-2. Evaluate:
-
-   * Accuracy
-   * Precision
-   * Recall
-   * F1-score
-
-3. Analyze:
-
-   * Effect of perturbation magnitude
-   * Detection under stress conditions
-
----
 
 # Final Note
 
