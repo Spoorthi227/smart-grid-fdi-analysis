@@ -2,6 +2,7 @@ const express = require('express');
 const { WebSocketServer } = require('ws');
 const cors = require('cors');
 const http = require('http');
+const axios = require('axios'); // Added axios for Python ML service communication
 
 const app = express();
 
@@ -24,6 +25,7 @@ const wss = new WebSocketServer({
 });
 
 let latestGridData = {};
+let latestPrediction = { attack: 0, label: 1, score: 0 }; // Stores the latest ML inference result
 
 // ------------------------------------------------------------
 // START SERVER
@@ -68,7 +70,48 @@ wss.on('connection', (ws) => {
 });
 
 // ------------------------------------------------------------
-// MATLAB API ENDPOINT
+// MATLAB API ENDPOINT (STATE RECEIVER & ML TRIGGER)
+// MATLAB sends raw state here to get checked by ML model
+// ------------------------------------------------------------
+app.post('/api/get-state', async (req, res) => {
+    try {
+        const payload = req.body;
+        
+        // Strict Feature Extraction Order: Pd, Qd, Vm, Va (1 to 14 each)
+        const features = [];
+        for (let i = 1; i <= 14; i++) features.push(payload[`Pd_bus${i}`] || 0);
+        for (let i = 1; i <= 14; i++) features.push(payload[`Qd_bus${i}`] || 0);
+        for (let i = 1; i <= 14; i++) features.push(payload[`Vm_bus${i}`] || 0);
+        for (let i = 1; i <= 14; i++) features.push(payload[`Va_bus${i}`] || 0);
+
+        // Send to Python ML Service synchronously
+        console.log('Sending state to ML Service (56 features)...');
+        const mlResponse = await axios.post('http://127.0.0.1:5000/predict', { features });
+        
+        // Update the prediction state
+        latestPrediction = mlResponse.data;
+        console.log('ML Prediction received:', latestPrediction);
+
+        // Acknowledge receipt to MATLAB
+        res.status(200).json({ status: 'State received and evaluated.' });
+    } catch (error) {
+        console.error('Error in ML pipeline:', error.message);
+        // Default to normal if ML fails to prevent false positives/crashes
+        latestPrediction = { attack: 0, label: 1, score: 0, error: error.message };
+        res.status(500).json({ error: 'ML inference failed' });
+    }
+});
+
+// ------------------------------------------------------------
+// MATLAB API ENDPOINT (MODEL RESULT)
+// MATLAB polls this to know if it should run forensic
+// ------------------------------------------------------------
+app.get('/api/model-result', (req, res) => {
+    res.json(latestPrediction);
+});
+
+// ------------------------------------------------------------
+// MATLAB API ENDPOINT (FORENSIC RESULT)
 // MATLAB sends forensic CSV-derived JSON here
 // ------------------------------------------------------------
 app.post('/api/update-grid', (req, res) => {
