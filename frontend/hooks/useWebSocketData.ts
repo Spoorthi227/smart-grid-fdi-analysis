@@ -2,23 +2,22 @@
 
 import { useEffect, useRef, useState } from 'react';
 import type { Bus, Line, AttackEvent, GridSnapshot } from '@/lib/api';
-import {
-  generateMockGridData,
-  generateMockAttacks,
-  generateMockKPIs,
-} from '@/lib/api';
 
 export function useWebSocketData() {
   const [buses, setBuses] = useState<Bus[]>([]);
   const [lines, setLines] = useState<Line[]>([]);
   const [attacks, setAttacks] = useState<AttackEvent[]>([]);
   const [gridData, setGridData] = useState<GridSnapshot | null>(null);
+
   const [riskScore, setRiskScore] = useState(0);
   const [detectionRate, setDetectionRate] = useState(0);
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
 
+  const [systemSummary, setSystemSummary] = useState<any>(null);
+  const [systemState, setSystemState] = useState<any>(null);
+
   const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     const wsUrl =
@@ -28,254 +27,153 @@ export function useWebSocketData() {
       process.env.NEXT_PUBLIC_API_BASE_URL ||
       'http://localhost:3001/api/dashboard';
 
-    // --------------------------------------------------------
-    // IEEE 14 BUS STATIC LAYOUT
-    // --------------------------------------------------------
-    const busCoordinates = [
-      { x: 100, y: 300 },
-      { x: 200, y: 200 },
-      { x: 300, y: 150 },
-      { x: 400, y: 200 },
-      { x: 500, y: 250 },
-      { x: 600, y: 350 },
-      { x: 300, y: 350 },
-      { x: 400, y: 400 },
-      { x: 500, y: 450 },
-      { x: 650, y: 450 },
-      { x: 700, y: 350 },
-      { x: 750, y: 250 },
-      { x: 850, y: 200 },
-      { x: 950, y: 300 },
-    ];
+    // ---------------- GRID LAYOUT ----------------
+    const busCoordinates = Array.from({ length: 14 }, (_, i) => ({
+      x: 120 + i * 55,
+      y: 250 + (i % 3) * 80,
+    }));
 
-    // --------------------------------------------------------
-    // IEEE 14 BUS BRANCH CONNECTIONS
-    // --------------------------------------------------------
     const lineConnections = [
-      [1, 2],
-      [1, 5],
-      [2, 3],
-      [2, 4],
-      [2, 5],
-      [3, 4],
-      [4, 5],
-      [4, 7],
-      [4, 9],
-      [5, 6],
-      [6, 11],
-      [6, 12],
-      [6, 13],
-      [7, 8],
-      [7, 9],
-      [9, 10],
-      [9, 14],
-      [10, 11],
-      [12, 13],
-      [13, 14],
+      [1, 2], [1, 5], [2, 3], [2, 4], [2, 5],
+      [3, 4], [4, 5], [4, 7], [4, 9], [5, 6],
+      [6, 11], [6, 12], [6, 13], [7, 8], [7, 9],
+      [9, 10], [9, 14], [10, 11], [12, 13], [13, 14],
     ];
 
-    // --------------------------------------------------------
-    // INITIAL MOCK DATA
-    // --------------------------------------------------------
-    const mockGridData = generateMockGridData();
-    const mockAttacks = generateMockAttacks();
-    const mockKPIs = generateMockKPIs();
+    // ---------------- SAFE ARRAY ----------------
+    const safeArray = (v: any) => {
+      if (!v) return [];
+      return Array.isArray(v) ? v : [v];
+    };
 
-    setBuses(mockGridData.buses);
-    setLines(mockGridData.lines);
-    setAttacks(mockAttacks);
-    setGridData(mockGridData);
-    setRiskScore(mockKPIs.risk_score);
-    setDetectionRate(mockKPIs.detection_rate);
-    setLastUpdate(new Date());
+    // ---------------- TRANSFORM ----------------
+    const transform = (raw: any): GridSnapshot => {
+      const compromised = safeArray(raw.primary_compromised_buses);
+      const affectedLines = safeArray(raw.affected_lines);
 
-    // --------------------------------------------------------
-    // TRANSFORM MATLAB DATA
-    // --------------------------------------------------------
-    const transformMatlabData = (rawData: any): GridSnapshot => {
-      const buses: Bus[] = (rawData.bus_scores || []).map(
-        (score: number, index: number) => ({
-          id: index + 1,
-          name: `Bus ${index + 1}`,
-          x: busCoordinates[index].x,
-          y: busCoordinates[index].y,
+      const buses: Bus[] = (raw.bus_scores || []).map(
+        (score: number, i: number) => ({
+          id: i + 1,
+          name: `Bus ${i + 1}`,
+          x: busCoordinates[i]?.x || 0,
+          y: busCoordinates[i]?.y || 0,
           suspicion_score: score,
-          compromised:
-            rawData.primary_compromised_buses?.includes(index + 1) || false,
-          impact_score: rawData.impact_scores?.[index] || 0,
-          root_candidate: rawData.root_bus === index + 1,
+
+          // FIXED
+          compromised: compromised.includes(i + 1),
+
+          impact_score: raw.impact_scores?.[i] || 0,
+          root_candidate: raw.root_bus === i + 1,
         })
       );
 
-      const lines: Line[] = lineConnections.map(
-        ([source, target], index) => ({
-          id: index + 1,
-          source,
-          target,
-          affected:
-            rawData.affected_lines?.includes(index + 1) || false,
-        })
-      );
+      const lines: Line[] = lineConnections.map(([s, t], i) => ({
+        id: i + 1,
+        source: s,
+        target: t,
+
+        // FIXED
+        affected: affectedLines.includes(i + 1),
+      }));
 
       return {
         buses,
         lines,
-        timestamp: rawData.timestamp || new Date().toISOString(),
-        root_bus: rawData.root_bus,
-        propagation_order: rawData.propagation_order || [],
+        timestamp: raw.timestamp,
+        root_bus: raw.root_bus,
+        propagation_order: raw.propagation_order || [],
       };
     };
 
-    // --------------------------------------------------------
-    // TRANSFORM ATTACK TIMELINE
-    // --------------------------------------------------------
-    const transformTimeline = (rawData: any): AttackEvent[] => {
-      return (rawData.timeline || []).map((bus: number, idx: number) => ({
-        id: idx,
-        timestamp: idx,
-        bus_id: bus,
-        event_type: idx === 0 ? 'origin' : 'propagation',
-        severity: rawData.impact_scores?.[bus - 1] || 0,
-      }));
-    };
+    // ---------------- APPLY DATA ----------------
+    const apply = (payload: any) => {
+      const grid = transform(payload);
 
-    // --------------------------------------------------------
-    // APPLY LIVE DATA
-    // --------------------------------------------------------
-    const applyLiveData = (payload: any) => {
-      const transformedGrid = transformMatlabData(payload);
-      const transformedAttacks = transformTimeline(payload);
+      setBuses(grid.buses);
+      setLines(grid.lines);
+      setGridData(grid);
 
-      setBuses(transformedGrid.buses);
-      setLines(transformedGrid.lines);
-      setGridData(transformedGrid);
-      setAttacks(transformedAttacks);
+      const compromised = safeArray(payload.primary_compromised_buses);
 
-      const compromisedCount =
-        payload.primary_compromised_buses?.length || 0;
-
-      const totalBuses = payload.bus_scores?.length || 14;
-
-      setRiskScore(
-        Math.min(
-          100,
-          (compromisedCount / totalBuses) * 100 +
-            (payload.root_bus ? 20 : 0)
-        )
+      setAttacks(
+        (payload.propagation_order || []).map((bus: number, i: number) => ({
+          id: i,
+          bus_id: bus,
+          timestamp: i,
+          event_type: i === 0 ? 'origin' : 'propagation',
+          severity: payload.impact_scores?.[bus - 1] || 0,
+        }))
       );
 
+      const isAttack =
+        payload.is_attack ?? systemState?.is_attack ?? false;
+
+      const risk =
+        isAttack
+          ? Math.min(100, compromised.length * 12 + 15)
+          : 0;
+
+      setRiskScore(risk);
       setDetectionRate(98.5);
       setLastUpdate(new Date());
-
-      console.log('[SmartGrid] Live backend data updated');
     };
 
-    // --------------------------------------------------------
-    // POLLING FALLBACK
-    // --------------------------------------------------------
-    let pollCleanup: (() => void) | undefined;
+    // ---------------- WS ----------------
+    const connect = () => {
+      wsRef.current = new WebSocket(wsUrl);
 
-    const setupPolling = () => {
-      console.log('[SmartGrid] Switching to polling mode...');
+      wsRef.current.onopen = () => {
+        console.log('[WS] connected');
+      };
 
-      const pollInterval = setInterval(async () => {
+      wsRef.current.onmessage = (e) => {
         try {
-          const response = await fetch(apiUrl);
+          const msg = JSON.parse(e.data);
 
-          if (!response.ok) return;
-
-          const data = await response.json();
-
-          if (data.current_state?.bus_scores) {
-            applyLiveData(data.current_state);
-            console.log('[SmartGrid] Polling successful');
+          if (msg.type === 'grid_update') {
+            apply(msg.payload);
           }
-        } catch (error) {
-          console.error('[SmartGrid] Polling error:', error);
+
+          if (msg.type === 'system_summary') {
+            setSystemSummary(msg.payload);
+          }
+
+          if (msg.type === 'system_state') {
+            setSystemState(msg.payload);
+          }
+
+        } catch (err) {
+          console.error('[WS] parse error', err);
         }
-      }, 2000);
+      };
 
-      pollCleanup = () => clearInterval(pollInterval);
+      wsRef.current.onclose = () => {
+        console.warn('[WS] reconnecting...');
+        reconnectRef.current = setTimeout(connect, 3000);
+      };
+
+      wsRef.current.onerror = () => {
+        console.error('[WS] error');
+      };
     };
 
-    // --------------------------------------------------------
-    // WEBSOCKET CONNECTION
-    // --------------------------------------------------------
-    const connectWebSocket = () => {
+    connect();
+
+    // ---------------- POLLING ----------------
+    const poll = setInterval(async () => {
       try {
-        console.log('[SmartGrid] Connecting to:', wsUrl);
+        const res = await fetch(apiUrl);
+        const data = await res.json();
 
-        wsRef.current = new WebSocket(wsUrl);
+        if (data.current_state) apply(data.current_state);
+        if (data.system_state) setSystemState(data.system_state);
+      } catch {}
+    }, 2000);
 
-        wsRef.current.onopen = () => {
-          console.log('[SmartGrid] WebSocket connected successfully');
-        };
-
-        wsRef.current.onmessage = (event) => {
-          try {
-            const data = JSON.parse(event.data);
-
-            if (data.type === 'grid_update') {
-              applyLiveData(data.payload);
-            }
-          } catch (error) {
-            console.error(
-              '[SmartGrid] Failed to parse WebSocket message:',
-              error
-            );
-          }
-        };
-
-        wsRef.current.onerror = (event) => {
-          console.error('[SmartGrid] WebSocket connection failed');
-          console.error('WebSocket URL:', wsUrl);
-          console.error('ReadyState:', wsRef.current?.readyState);
-          console.error('Error Event:', event);
-        };
-
-        wsRef.current.onclose = () => {
-          console.warn(
-            '[SmartGrid] WebSocket disconnected. Reconnecting in 3s...'
-          );
-
-          if (!pollCleanup) {
-            setupPolling();
-          }
-
-          reconnectTimeoutRef.current = setTimeout(
-            connectWebSocket,
-            3000
-          );
-        };
-      } catch (error) {
-        console.error(
-          '[SmartGrid] WebSocket initialization failed:',
-          error
-        );
-        setupPolling();
-      }
-    };
-
-    // --------------------------------------------------------
-    // START
-    // --------------------------------------------------------
-    connectWebSocket();
-
-    // --------------------------------------------------------
-    // CLEANUP
-    // --------------------------------------------------------
     return () => {
-      if (wsRef.current) {
-        wsRef.current.close();
-      }
-
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-      }
-
-      if (pollCleanup) {
-        pollCleanup();
-      }
+      wsRef.current?.close();
+      clearInterval(poll);
+      if (reconnectRef.current) clearTimeout(reconnectRef.current);
     };
   }, []);
 
@@ -287,5 +185,7 @@ export function useWebSocketData() {
     riskScore,
     detectionRate,
     lastUpdate,
+    systemSummary,
+    systemState,
   };
 }
